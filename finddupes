@@ -1,0 +1,260 @@
+#!/bin/sh
+
+# finddupes 0.1
+
+usage () {
+	echo Usage: $0 catfile
+}
+
+if [ "$#" != "1" ]; then
+	usage >&2
+	exit 1
+fi
+
+CATFILE="$1"
+if [ ! -r "$CATFILE" ]; then
+	echo Unable to access file "$CATFILE"
+	exit 1
+fi
+TMPCATFILE="$( mktemp -t "$0"-catfile-tmp )"
+grep -v '^[[:space:]]*#' "$CATFILE" > "$TMPCATFILE"
+CATFILE="$TMPCATFILE"
+export CATFILE
+
+DUPEFILES="$( mktemp -t "$0"-tmp-dupefiles )"
+DIRCAT="$( mktemp -t "$0"-tmp-dircat )"
+RMFILE="$( mktemp -t "$0"-tmp-rmfiles )"
+
+trap 'rm -f "$TMPCATFILE" "$DUPEFILES" "$DIRCAT" "$RMFILE"' EXIT
+
+# ensure catalog file is of the proper format
+BADLINES="$( grep -E -v '^".+",[0-9]+,[[:alnum:]]+$' "$CATFILE" )"
+if [ -n "$BADLINES" ]; then 
+	echo "Improperly formatted lines in $CATFILE:" >&2
+	echo "$BADLINES" >&2
+	echo "Exiting." >&2
+	exit 1
+fi
+
+# mkcatfile dirname creates the catalog of files beneath dirname.
+# adapted from the standalone script
+# TODO: Should this also include directories? What about links? What
+#       about other information, say, accessible to stat?
+mkcatfile () {
+	if [ "$#" != "1" ]; then
+		return 1
+	fi
+
+	DIR="$1"
+	DIR="$( echo "$DIR" | sed -E 's#(.)/*$#\1#' )"
+	if [ ! -r "$DIR" ]; then
+		echo "Unable to access directory $DIR" >&2
+		exit 1
+	fi
+
+	SPECIALS="$( find "$DIR" -not -type f -not -type d )"
+	if [ -n "$SPECIALS" ]; then
+		echo "Warning: there are specials beneath $DIR." >&2
+	fi
+
+	find "$DIR" -type f -print0 | 
+		xargs -0 -r -I {} /bin/sh -c '
+			catfiles() {                                                
+					for file in "$@"; do                                
+							if [ ! -r "$file" ]; then                   
+									echo "Unable to access file \"$file\"" >&2
+							else                                            
+									SIZE="$( stat -c "%s" "$file" )"        
+									MD5="$( md5sum "$file" | cut -f 1 -d " " )"
+									echo \""$file"\",$SIZE,$MD5              
+							fi                                                 
+					done                                          
+			}                  
+			catfiles "$@"
+			' _ {}
+}
+
+# fixdirname dirname standardizes dirname so that it has exactly one leading and one trailing /
+fixdirname () {
+	if [ "$#" != "1" ]; then return 1; fi
+	echo "$1" | sed -E -e 's#^/*#/#' -e 's#/*$#/#'
+}
+# getdir dirname lists all lines in the catalog file starting with dirname/, i.e., all
+# files in dirname or a subdirectory of dirname
+getdir () {
+	if [ "$#" != "1" ]; then return 1; fi
+	DIRNAME="$( fixdirname "$1" )"
+	DIRNAME="$( echo "$DIRNAME" | sed 's/\([].*\\^$"[]\)/\\\1/g' )"
+	grep '^"'"${DIRNAME}"'.*",[0-9]\+,[[:alnum:]]\+$' "$CATFILE"
+}
+# getdirnums dirname returns a "summary" MD5 of all the sizes & MD5 hashes (separated by ',' and sorted) of 
+# files in dirname or a subdirectory of dirname listed in the catalog file; this may be used
+# to compare directory contents
+getdirnums () {
+	if [ "$#" != "1" ]; then return 1; fi
+	getdir "$1" | 
+		sed -E -e 's/^".*",//' |
+		sort -n |
+		md5 -q
+}
+# getancestors dirname returns all directories that are ancestors (parent directories) of dirname,
+# including dirname itself, up to but not including / (which may not be the root of the catalog file)
+getancestors () {
+	if [ "$#" != "1" ]; then return 1; fi
+	while [ "$DIRNAME" != "/" ]; do
+		DIRNAME="$( fixdirname "$1" )"
+		echo "$DIRNAME"
+		DIRNAME="$( dirname "$DIRNAME" )"
+	done
+}
+
+# getdupelines catfile outputs the portion of lines without the file or directory name
+# from the given catfile, one duplicate set per line, for each 
+# duplicate set in the catalog file
+getdupelines () {
+	if [ "$#" != "1" ]; then return 1; fi
+	sed -E -e 's/^.*",([,[:alnum:]]+)$/\1/' "$1" |
+		sort -n | 
+		uniq -d 
+} 
+
+mkdircat () {
+	TEMPFILE="$( mktemp -t "$( basename "$0" )" || exit 1 )"
+	( cat "$CATFILE" && echo ) |
+		sed -E -e 's/,[0-9]+,[[:alnum:]]+$//' -e 's/^"//' -e 's/"$//' |
+		while read file; do
+			if [ -n "$file" ] && [ "${file#/}" != "$file" ]; then
+				while [ "$file" != "/" ]; do
+					file="$( dirname "$file" )"
+					ESCFILE="$( echo "$file" | sed 's/\([].*\\^$"[]\)/\\\1/g' )"
+					if grep '^"'"${ESCFILE}"'",[[:alnum:]]\+$' "$TEMPFILE" >/dev/null 2>&1; then
+						break
+					else
+						echo '"'"$file"'",'"$( getdirnums "$file" )" | tee -a "$TEMPFILE"
+					fi
+				done
+			fi
+		done | 
+			sed -e 's/^.*",//' |
+			sort |
+			uniq -d |
+			while read md5sum; do
+				topdir=
+				grep '",'"$md5sum"'$' "$TEMPFILE" | 
+					sed -E -e 's/,[[:alnum:]]+$//' -e 's/^"//' -e 's/"$//' |
+					sort |
+					while read dirname; do
+						if [ -z "$topdir" ]; then 
+							topdir="$dirname"
+							echo '## keep "'"$topdir"'" # md5sum '"$md5sum"
+						elif [ "${dirname#"$topdir"}" == "$dirname" ]; then
+							# dirname is *not* a descendant of topdir
+							echo '# rm -r "'"$dirname"'" # md5sum '"$md5sum"
+							topdir="$dirname"
+						fi
+					done
+			done > "$RMFILE"
+	rm "$TEMPFILE"
+} 
+
+# outputs human-readable list of duplicate file sets
+nicelistdupefiles () {
+	getdupenums | while read line; do 
+			echo "$line" | sed -E -e 's/^(.*),(.*)$/Size: \1 MD5: \2:/'
+			grep -E ",$line$" "$CATFILE" | 
+				sed -E -e 's/^"(.+)",[,[:alnum:]]+$/\1/'
+			echo
+		done
+}
+
+# integrate the mkcat script into this one as well.
+# add ability to update catfile with only files changed based on mtime? record mtime in file?
+# differentiate between copies of files and hard lnks (really only important for stats)
+
+# I don't think it's doing leftover files right
+
+
+# find empty directories - would require including directories in catalog file
+
+# report removal stats, including number of files, directories, and bytes
+# output file vs pretty list
+
+getdupelines "$CATFILE" |
+	while read dupenums; do
+		grep '",'"$dupenums"'$' "$CATFILE" |
+			while read fileline; do
+				echo "$fileline" >> "$DUPEFILES"
+				dirname="$( echo "$fileline" | sed -E -e 's/^"//' -e 's/",[,[:alnum:]]+$//' )"
+				dirname="$( dirname "$dirname" )"
+				getancestors "$dirname" |
+					while read dir; do
+						escfile="$( echo "$dir" | sed 's/\([].*\\^$"[]\)/\\\1/g' )"
+						if grep '^"'"${escfile}"'",[[:alnum:]]\+$' "$DIRCAT" >/dev/null 2>&1; then
+							break
+						else
+							echo '"'"$dir"'",'"$( getdirnums "$dir" )" >> "$DIRCAT"
+						fi
+					done
+			done
+	done
+getdupelines "$DIRCAT" |
+	while read dupenums; do
+		topdir=
+		grep '",'"$dupenums"'$' "$DIRCAT" |
+			sed -E -e 's/,[[:alnum:]]+$//' -e 's/^"//' -e 's/"$//' |
+			sort |
+			while read dirname; do
+				if [ -z "$topdir" ]; then 
+					topdir="$dirname"
+				elif [ "${dirname#"$topdir"}" == "$dirname" ]; then
+					# dirname is *not* a descendant of topdir
+					keepline='## keep "'"$topdir"'" # md5sum '"$dupenums"
+					rmline='# rm -r "'"$topdir"'" # md5sum '"$dupenums"
+					if [ "$( tail -n 1 "$RMFILE" )" != "$rmline" ]; then
+						echo "$keepline" >> "$RMFILE"
+					fi
+					echo '# rm -r "'"$dirname"'" # md5sum '"$dupenums" >> "$RMFILE"
+					topdir="$dirname"
+				fi
+			done
+	done
+cat /dev/null > "$TMPCATFILE"
+cat "$DUPEFILES" |
+	while read dupeline; do
+		filename="$( echo "$fileline" | sed -E -e 's/^"//' -e 's/",[,[:alnum:]]+$//' )"
+		dirname="$( dirname "$filename" )"
+		removed=
+		getancestors "$dirname" |
+			while read dir; do
+				escdir="$( echo "$dir" | sed 's/\([].*\\^$"[]\)/\\\1/g' )"
+				if grep '^# rm -r "'"$escdir"'" # md5sum [[:alnum:]]\+$' "$RMFILE"; then
+					# the file's directory (or a parent) is already being removed
+					removed=y
+					break
+				fi
+			done
+		if [ -z "$removed" ]; then
+			echo "$dupeline" >> "$TMPCATFILE"
+		fi
+	done
+cat /dev/null > "$DUPEFILES"
+getdupelines "$TMPCATFILE" |
+	while read dupenums; do
+		keepfile=
+		filesize="$( echo "$dupenums" | sed -E 's/^([0-9]+),[[:alnum:]]+$/\1/' )"
+		filemd5="$( echo "$dupenums" | sed -E 's/^[0-9]+,([[:alnum:]]+)$/\1/' )"
+		grep '",'"$dupenums"'$' "$TMPCATFILE" |
+			sed -E -e 's/,[,[:alnum:]]+$//' -e 's/^"//' -e 's/"$//' |
+			sort |
+			while read filename; do
+				if [ -z "$keepfile" ]; then
+					keepfile="$filename"
+					echo '## keep "'"$filename"'" # size '"$filesize"' md5sum '"$filemd5" >> "$RMFILE"
+				else
+					echo '# rm "'"$filename"'" #size '"$filesize"' md5sum '"$filemd5" >> "$RMFILE"
+				fi
+			done
+	done
+cat "$RMFILE"
+
+
