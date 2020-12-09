@@ -1,40 +1,12 @@
 #!/bin/sh
 
-# finddupes 0.1
+# finddupes WIP
 
 usage() {
-	echo Usage: $0 catfile
+	echo 'Usage: '$0 [-v] [--] -c catfile
+	echo '       '$0 [-v] [--] directory
+	echo '       '$0 [-h]
 }
-
-if [ "$#" != "1" ]; then
-	usage >&2
-	exit 1
-fi
-
-CATFILE="$1"
-if [ ! -r "$CATFILE" ]; then
-	echo Unable to access file "$CATFILE"
-	exit 1
-fi
-TMPCATFILE="$(mktemp -t "$0"-catfile-tmp)"
-grep -v '^[[:space:]]*#' "$CATFILE" >"$TMPCATFILE"
-CATFILE="$TMPCATFILE"
-export CATFILE
-
-DUPEFILES="$(mktemp -t "$0"-tmp-dupefiles)"
-DIRCAT="$(mktemp -t "$0"-tmp-dircat)"
-RMFILE="$(mktemp -t "$0"-tmp-rmfiles)"
-
-trap 'rm -f "$TMPCATFILE" "$DUPEFILES" "$DIRCAT" "$RMFILE"' EXIT
-
-# ensure catalog file is of the proper format
-BADLINES="$(grep -E -v '^".+",[0-9]+,[[:alnum:]]+$' "$CATFILE")"
-if [ -n "$BADLINES" ]; then
-	echo "Improperly formatted lines in $CATFILE:" >&2
-	echo "$BADLINES" >&2
-	echo "Exiting." >&2
-	exit 1
-fi
 
 # mkcatfile dirname creates the catalog of files beneath dirname.
 # adapted from the standalone script
@@ -54,7 +26,7 @@ mkcatfile() {
 
 	SPECIALS="$(find "$DIR" -not -type f -not -type d)"
 	if [ -n "$SPECIALS" ]; then
-		echo "Warning: there are specials beneath $DIR." >&2
+		echo "Warning: there are specials beneath $DIR. Excluding." >&2
 	fi
 
 	find "$DIR" -type f -print0 |
@@ -73,6 +45,69 @@ mkcatfile() {
 			catfiles "$@"
 			' _ {}
 }
+
+VERBOSE=
+CATFILE=
+ROOTDIR=
+
+if [ "$#" = "0" ]; then
+	usage >&2
+	exit 1
+fi
+
+while getopts vhc: option; do
+	case "$option" in
+		v) VERBOSE=y ;;
+		h) usage && exit ;;
+		c) CATFILE="$OPTARG" ;;
+		"?") usage >&2 && exit 1 ;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+# $0 catfile is deprecated but still allowed for backwards compatibility
+if [ "$#" = "1" ]; then
+	if [ -n "$CATFILE" ]; then
+		usage >&2
+		exit 1
+	fi
+	if [ -d "$1" ]; then
+		ROOTDIR="$1"
+	elif [ -r "$CATFILE" ]; then
+		CATFILE="$1"
+	else
+		echo Unable to access file "$CATFILE" >&2
+		exit 1
+	fi
+elif [ "$#" -gt "1" ]; then
+	usage >&2
+	exit 1
+elif [ -z "$CATFILE" ]; then
+	usage >&2
+	exit 1
+fi
+
+trap 'rm -f "$TMPCATFILE" "$DUPEFILES" "$DIRCAT" "$RMFILE"' EXIT
+TMPCATFILE="$(mktemp -t "$0"-catfile-tmp)"
+if [ -n "$CATFILE" ]; then
+	grep -v '^[[:space:]]*#' "$CATFILE" >"$TMPCATFILE"
+	# ensure catalog file is of the proper format
+	BADLINES="$(grep -E -v '^".+",[0-9]+,[[:alnum:]]+$' "$TMPCATFILE")"
+	if [ -n "$BADLINES" ]; then
+		echo "Improperly formatted lines in $CATFILE:" >&2
+		echo "$BADLINES" >&2
+		echo "Exiting." >&2
+		exit 1
+	fi
+else
+	mkcatfile "$ROOTDIR" > "$TMPCATFILE"
+fi
+CATFILE="$TMPCATFILE"
+export CATFILE
+
+DUPEFILES="$(mktemp -t "$0"-tmp-dupefiles)"
+DIRCAT="$(mktemp -t "$0"-tmp-dircat)"
+RMFILE="$(mktemp -t "$0"-tmp-rmfiles)"
 
 # fixdirname dirname standardizes dirname so that it has exactly one leading and one trailing /
 fixdirname() {
@@ -147,7 +182,7 @@ mkdircat() {
 					if [ -z "$topdir" ]; then
 						topdir="$dirname"
 						echo '## keep "'"$topdir"'" # md5sum '"$md5sum"
-					elif [ "${dirname#"$topdir"}" == "$dirname" ]; then
+					elif [ "${dirname#"$topdir"}" = "$dirname" ]; then
 						# dirname is *not* a descendant of topdir
 						echo '# rm -r "'"$dirname"'" # md5sum '"$md5sum"
 						topdir="$dirname"
@@ -205,7 +240,7 @@ getdupelines "$DIRCAT" |
 			while read dirname; do
 				if [ -z "$topdir" ]; then
 					topdir="$dirname"
-				elif [ "${dirname#"$topdir"}" == "$dirname" ]; then
+				elif [ "${dirname#"$topdir"}" = "$dirname" ]; then
 					# dirname is *not* a descendant of topdir
 					keepline='## keep "'"$topdir"'" # md5sum '"$dupenums"
 					rmline='# rm -r "'"$topdir"'" # md5sum '"$dupenums"
