@@ -2,6 +2,20 @@
 
 # finddupes WIP
 
+# various utilities that vary on various systems
+if ! stat -c foo . >/dev/null 2>&1; then
+	STAT='stat -f %z'
+else
+	STAT='stat -c %s'
+fi
+export STAT
+if ! which md5sum >/dev/null 2>&1; then
+	MD5SUM='md5 -q'
+else
+	MD5SUM='md5sum'
+fi
+export MD5SUM
+
 usage() {
 	echo 'Usage: '$0 [-v] [--] -c catfile
 	echo '       '$0 [-v] [--] directory
@@ -12,6 +26,7 @@ usage() {
 # adapted from the standalone script
 # TODO: Should this also include directories? What about links? What
 #       about other information, say, accessible to stat?
+# new version to include inode number, size, cksum
 mkcatfile() {
 	if [ "$#" != "1" ]; then
 		return 1
@@ -36,14 +51,14 @@ mkcatfile() {
 							if [ ! -r "$file" ]; then                   
 									echo "Unable to access file \"$file\"" >&2
 							else                                            
-									SIZE="$( stat -c "%s" "$file" )"        
-									MD5="$( md5sum "$file" | cut -f 1 -d " " )"
+									SIZE="$( $STAT "$file" )"        
+									MD5="$( $MD5SUM "$file" | cut -f1 -d" " )"
 									echo \""$file"\",$SIZE,$MD5              
 							fi                                                 
 					done                                          
 			}                  
 			catfiles "$@"
-			' _ {}
+			' "$0-xargs" {}
 }
 
 VERBOSE=
@@ -87,8 +102,8 @@ elif [ -z "$CATFILE" ]; then
 	exit 1
 fi
 
-trap 'rm -f "$TMPCATFILE" "$DUPEFILES" "$DIRCAT" "$RMFILE"' EXIT
-TMPCATFILE="$(mktemp -t "$0"-catfile-tmp)"
+trap 'rm -f "$TMPCATFILE" "$DUPEFILES" "$DIRCAT" "$RMFILE"' INT TERM EXIT
+TMPCATFILE="$(mktemp -t "$(basename "$0")"-catfile-tmp-XXXXXX)"
 if [ -n "$CATFILE" ]; then
 	grep -v '^[[:space:]]*#' "$CATFILE" >"$TMPCATFILE"
 	# ensure catalog file is of the proper format
@@ -105,9 +120,9 @@ fi
 CATFILE="$TMPCATFILE"
 export CATFILE
 
-DUPEFILES="$(mktemp -t "$0"-tmp-dupefiles)"
-DIRCAT="$(mktemp -t "$0"-tmp-dircat)"
-RMFILE="$(mktemp -t "$0"-tmp-rmfiles)"
+DUPEFILES="$(mktemp -t "$(basename "$0")"-tmp-dupefiles-XXXXXX)"
+DIRCAT="$(mktemp -t "$(basename "$0")"-tmp-dircat-XXXXXX)"
+RMFILE="$(mktemp -t "$(basename "$0")"-tmp-rmfiles-XXXXXX)"
 
 # fixdirname dirname standardizes dirname so that it has exactly one leading and one trailing /
 fixdirname() {
@@ -130,7 +145,7 @@ getdirnums() {
 	getdir "$1" |
 		sed -E -e 's/^".*",//' |
 		sort -n |
-		md5 -q
+		$MD5SUM
 }
 # getancestors dirname returns all directories that are ancestors (parent directories) of dirname,
 # including dirname itself, up to but not including / (which may not be the root of the catalog file)
@@ -154,7 +169,7 @@ getdupelines() {
 }
 
 mkdircat() {
-	TEMPFILE="$(mktemp -t "$(basename "$0")" || exit 1)"
+	TEMPFILE="$(mktemp -t "$(basename "$0")"-XXXXXX || exit 1)"
 	(cat "$CATFILE" && echo) |
 		sed -E -e 's/,[0-9]+,[[:alnum:]]+$//' -e 's/^"//' -e 's/"$//' |
 		while read file; do
